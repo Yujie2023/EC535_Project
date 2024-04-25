@@ -6,10 +6,22 @@ change directory to the folder contains mysnake.c and Makefile
 source /ad/eng/courses/ec/ec535/bashrc_ec535 make the scouce file and put the .ko file to root diretory
 enter: make
 
+
 Beagleboone setup:
 
 set up the device and the serial console
 press-and-hold the S2 button9 before, during, and for the first 3 seconds after connecting the power
+
+
+Pin connect:
+use button:
+up-button:    GPIO_26
+right-button  GPIO_46
+down-button   GPIO_47
+left-button   GPIO_27
+
+use voice control:
+
 
 Run program:
 
