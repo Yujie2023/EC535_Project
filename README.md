@@ -1,6 +1,6 @@
 you can choos to run mysnake.ko directly, or you can firstly compile mysnake.c and then run it.
 
-Compile:
+Compile:/n
 change directory to the folder contains mysnake.c and Makefile
 source /ad/eng/courses/ec/ec535/bashrc_ec535 make the scouce file and put the .ko file to root diretory
 enter: make
