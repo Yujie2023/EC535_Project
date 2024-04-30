@@ -1,30 +1,43 @@
-you can choos to run mysnake.ko directly, or you can firstly compile mysnake.c and then run it.
+# MySnake Module Instructions
 
-Compile:
+## Running Options
+You can choose to:
+- **Run Directly**: Use `mysnake.ko` directly.
+- **Compile First**: Compile `mysnake.c` and then run the resulting `.ko` file.
 
-change directory to the folder contains mysnake.c and Makefile
-source /ad/eng/courses/ec/ec535/bashrc_ec535 make the scouce file and put the .ko file to root diretory
-enter: make
+## Compile Instructions
 
+1. **Change Directory**:
+   - Navigate to the folder that contains `mysnake.c` and `Makefile`.
+2. **Source Environment**:
+   - Execute `source /ad/eng/courses/ec/ec535/bashrc_ec535`.
+3. **Compile**:
+   - Make the source file and move the `.ko` file to the root directory:
+     ```bash
+     make
+     ```
 
-Beagleboone setup:
+## BeagleBone Setup
 
-set up the device and the serial console
-press-and-hold the S2 button9 before, during, and for the first 3 seconds after connecting the power
+1. **Device Setup**:
+   - Set up the device and the serial console.
+   - **Press-and-Hold the S2 Button**: Do this before, during, and for the first 3 seconds after connecting the power.
 
+2. **Pin Connections**:
+   - **Up-Command**: GPIO_26
+   - **Right-Command**: GPIO_46
+   - **Down-Command**: GPIO_47
+   - **Left-Command**: GPIO_27
 
-Pin connect:
-use button:
-up-button:    GPIO_26
-right-button  GPIO_46
-down-button   GPIO_47
-left-button   GPIO_27
+## Running the Program
 
-use voice control:
+1. **Create Device Node**:
+   ```bash
+   mknod /dev/myscreensaver c 61 0
+   insmod /root/myscreensaver.ko
+2. **Directly use .ko**:
+   ```bash
+   insmod /root/mysnake.ko 
+## Youtube Link
 
-
-Run program:
-
-mknod /dev/myscreensaver c 61 0
-insmod /root/myscreensaver.ko (compile from mysanke.c)
- or insmod /root/mysnake.ko (run directly mysanke.ko)
+https://youtu.be/Wy9uWW-lp54
