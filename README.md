@@ -1,6 +1,7 @@
 # MySnake Module Instructions
 
 ## Running Options
+The final .c and .ko file are in EC535_Project/maincode/
 You can choose to:
 - **Run Directly**: Use `mysnake.ko` directly.
 - **Compile First**: Compile `mysnake.c` and then run the resulting `.ko` file.
