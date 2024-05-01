@@ -1,1 +1,909 @@
+#include <linux/init.h>
+#include <linux/module.h>
+#include <linux/random.h>     //random number
+#include <linux/kernel.h>
+#include <linux/fb.h>
+#include <linux/fs.h> /* everything... */
+#include <linux/mutex.h>
+#include <linux/major.h>
+#include <linux/device.h>
+#include <linux/cdev.h>
+#include <linux/uaccess.h> // copy_from/to_user
+#include <asm/uaccess.h> // ^same
+#include <linux/sched.h> // for timers
+#include <linux/jiffies.h> // for jiffies global variable
+#include <linux/string.h> // for string manipulation functions
+#include <linux/ctype.h> // for isdigit
+#include <linux/delay.h> //for msleep()
+#include <linux/input.h> //for input_register_handler()
+#include <linux/slab.h> /* kmalloc() */
+#include <linux/fcntl.h> /* O_ACCMODE */
+#include <linux/timer.h>
+#include <linux/gpio.h>
+#include <linux/interrupt.h>
+#include <linux/proc_fs.h>
+
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("yjz122&zhaoyimo");
+
+//graphics colors
+#define CYG_FB_DEFAULT_PALETTE_BLUE         0x01
+#define CYG_FB_DEFAULT_PALETTE_RED          0x04
+#define CYG_FB_DEFAULT_PALETTE_WHITE        0x0F
+#define CYG_FB_DEFAULT_PALETTE_LIGHTBLUE    0x09
+#define CYG_FB_DEFAULT_PALETTE_BLACK        0x00
+
+//gpio button
+#define BTN_ZERO 26    						//up
+#define BTN_ONE 46							//right
+#define BTN_TWO 47							//down
+#define BTN_THREE 27							//left
+
+// CHARACTER DEVICE VARIABLES
+static int myscreensaver_major = 61;
+
+
+struct fb_info *info;
+struct fb_fillrect *blank;
+struct fb_fillrect *Rblank;
+struct fb_fillrect *bulogo[9];
+
+struct fb_fillrect *snakeimage[100];
+struct fb_fillrect *foodimage[1];
+struct fb_fillrect *barrierimage[51];
+struct fb_fillrect *digitimage[35];
+
+static int input_flag = 1;
+static int g_start = 0;
+static int dir_vector = 0;      //buffer of the direction
+static int time_base = 10;
+void screensaver_handler(void);
+void build_arrays(void);
+
+//snake
+struct SNAKE{
+	int length;
+	int direction;
+	int speed;
+	int flag;
+	int x[100];
+	int y[100];
+};
+
+struct FOOD{
+	int x;
+	int y;
+	int flag;
+};
+
+struct BARRIER{
+	int num;
+	int x[50];
+	int y[50];
+};
+
+struct SNAKE* snake;     //global struct pointer
+struct FOOD* food;
+struct BARRIER* barrier;
+
+//Game
+void Snake_Init(struct SNAKE* snake);
+void Food_Init(struct SNAKE* snake, struct FOOD* food);
+void Barrier_Init(struct SNAKE* snake, struct FOOD* food, struct BARRIER* barrier);
+void Snake_Draw(struct SNAKE* snake);
+void Food_Draw(struct FOOD* food);
+void Barrier_Draw(struct BARRIER* barrier);
+void Snake_Move(struct SNAKE* snake);
+void Snake_Chdir(struct SNAKE* snake, int dir);
+void Eatfood(struct SNAKE* snake, struct FOOD* food);
+static int Snakecrash(void);
+void GAME_Start(struct SNAKE* snake, struct FOOD* food, struct BARRIER* barrier);
+void GAME_Handle(struct SNAKE* snake, struct FOOD* food, struct BARRIER* barrier);
+void Game_Screen(void);
+void Start_Screen(struct fb_fillrect *blank);
+void Credit_Screen(void);
+int Button_Init(int btn);
+int BTNs_Init(int btn0, int btn1, int btn2, int btn3);
+static irqreturn_t btn0_handler(int irq, void *dev_id);
+static irqreturn_t btn1_handler(int irq, void *dev_id);
+static irqreturn_t btn2_handler(int irq, void *dev_id);
+static irqreturn_t btn3_handler(int irq, void *dev_id);
+void Credit_Process(struct SNAKE* snake);
+void Digits_Draw(int digitnum, int digit, int num);
+
+
+// TIMER 
+static struct timer_list Timer;
+int del_timer_sync(struct timer_list *Timer);
+
+void mytimer_callback(struct timer_list *Timer)
+{
+	input_flag = 1;
+	//screensaver_handler();
+
+	if(g_start==0) GAME_Start(snake, food, barrier);
+	else if(g_start==1) GAME_Handle(snake, food, barrier);
+}
+
+static int myscreensaver_open(struct inode *inode, struct file *filp);
+static int myscreensaver_release(struct inode *inode, struct file *filp);
+struct file_operations myscreensaver_fops = {
+	open: myscreensaver_open,
+	release: myscreensaver_release,
+};
+
+static struct input_device_id screenev_ids[2];
+static int screenev_connect(struct input_handler *handler, struct input_dev *dev, const struct input_device_id *id);
+static void screenev_disconnect(struct input_handle *handle);
+static void screenev_event(struct input_handle *handle, unsigned int type, unsigned int code, int value);
+
+
+void Snake_Init(struct SNAKE* snake){
+	int i;
+	//initial snake
+	snake->length = 2;
+	snake->direction = 2;    //up 1, right 2, down3, left4
+	snake->speed = 1;
+	snake->flag = 0;
+	for(i=0; i<100; i++){
+		snake->x[i] = NULL;
+		snake->y[i] = NULL;
+	}
+	snake->x[0] = 16;   //snake head
+	snake->y[0] = 16;
+	snake->x[1] = 0;
+	snake->y[1] = 16;
+}
+
+void Food_Init(struct SNAKE* snake, struct FOOD* food){ 
+	int conflict;
+	int j;
+	while(1){
+    conflict = 0;
+		unsigned int rannum1, rannum2;     //random number
+		get_random_bytes(&rannum1, sizeof(rannum1));
+		food->x = (rannum1 % 480)-((rannum1 % 480)%16);
+		get_random_bytes(&rannum2, sizeof(rannum2));
+		food->y = (rannum2 % 272)-((rannum2 % 272)%16);
+
+		for(j=0; j<snake->length; j++){
+			if(food->x == snake->x[j] && food->y == snake->y[j]){
+			conflict = 1;
+			break;
+			}
+		}
+		if(conflict==0) break;     //food do not conflict snake
+	}
+	food->flag=0;                     //initial, not eat
+}
+
+void Barrier_Init(struct SNAKE* snake, struct FOOD* food, struct BARRIER* barrier){
+	int i=0;
+	int conflict=0;
+	int j;
+	barrier->num = snake->length/2+1;
+	while(i<barrier->num){
+    conflict = 0;     //avoid infinient loop!!!
+		unsigned int rannum1, rannum2;     //random number
+		get_random_bytes(&rannum1, sizeof(rannum1));
+		barrier->x[i] = (rannum1 % 480)-((rannum1 % 480)%16);
+		get_random_bytes(&rannum2, sizeof(rannum2));
+		barrier->y[i] = (rannum2 % 272)-((rannum2 % 272)%16);
+
+		for(j=0; j<snake->length; j++){
+			if(barrier->x[i]==snake->x[j] && barrier->y[i]==snake->y[j]){
+				conflict = 1;
+				break;
+			}
+		}
+		if(barrier->x[i]==food->x && barrier->y[i]==food->y){
+			conflict = 1;
+		}
+		if(conflict==1) continue;
+		else i++;
+	}
+}
+
+
+void Snake_Draw(struct SNAKE* snake){
+	int i=0;
+	while(i<snake->length){
+		snakeimage[i] = kmalloc(sizeof(struct fb_fillrect), GFP_KERNEL);
+		snakeimage[i]->color = CYG_FB_DEFAULT_PALETTE_LIGHTBLUE;
+		snakeimage[i]->rop = ROP_COPY;
+
+		snakeimage[i]->dx = (snake->x[i]+1);
+		snakeimage[i]->dy = (snake->y[i]+1);
+		snakeimage[i]->width = 15;
+		snakeimage[i]->height = 15;
+
+		i++;
+	}
+}
+
+void Food_Draw(struct FOOD* food){
+	int i=0;
+	foodimage[i] = kmalloc(sizeof(struct fb_fillrect), GFP_KERNEL);
+	foodimage[i]->color = CYG_FB_DEFAULT_PALETTE_RED;
+
+	foodimage[i]->rop = ROP_COPY;
+	foodimage[i]->dx = (food->x);
+	foodimage[i]->dy = (food->y);
+	foodimage[i]->width = 16;
+	foodimage[i]->height = 16;
+}
+
+void Barrier_Draw(struct BARRIER* barrier){
+	int i=0;
+	while(i<barrier->num){
+		barrierimage[i] = kmalloc(sizeof(struct fb_fillrect), GFP_KERNEL);
+		barrierimage[i]->color = CYG_FB_DEFAULT_PALETTE_WHITE;
+		barrierimage[i]->rop = ROP_COPY;
+
+		barrierimage[i]->dx = (barrier->x[i]+1);
+		barrierimage[i]->dy = (barrier->y[i]+1);
+		barrierimage[i]->width = 16;
+		barrierimage[i]->height = 16;
+
+		i++;
+	}
+}
+
+void Snake_Move(struct SNAKE* snake){
+	int i;
+	//except snake head
+	if(snake->flag==0){
+		for(i=(snake->length-1); i>0; i--){      //except snake head
+			snake->x[i] = snake->x[i-1];
+			snake->y[i] = snake->y[i-1];
+		}
+	}
+	else if(snake->flag==1){
+		for(i=(snake->length); i>0; i--){      //the snake eat
+			snake->x[i] = snake->x[i-1];
+			snake->y[i] = snake->y[i-1];
+		}
+		snake->length++;                   //make snake longer
+	}
+	//snake head
+	switch (snake->direction)
+	{
+	case 1:      //up
+		snake->y[0] = snake->y[0]+16;
+		if(snake->y[0]>256) snake->y[0] = 0;
+		break;
+
+	case 2:   //right
+		snake->x[0] = snake->x[0]+16;
+		if(snake->x[0]>464) snake->x[0] = 0;
+		break;
+
+	case 3:     //down
+		snake->y[0] = snake->y[0]-16;
+		if(snake->y[0]<0) snake->y[0] = 256;     //one head in and one head out
+		break;
+
+	case 4:		//left
+		snake->x[0] = snake->x[0]-16;
+		if(snake->x[0]<0) snake->x[0] = 464;
+		break;
+
+	default:
+		break;
+	}
+
+	//get the new food and barrier
+	if(snake->flag==1){
+		Food_Init(snake, food);             	//new food
+		Barrier_Init(snake, food, barrier); 	//barrier
+		snake->flag = 0;     					//return to 0
+	}
+
+}
+
+void Snake_Chdir(struct SNAKE* snake, int dir){
+	if(dir==1){    			//up
+		if(snake->direction == 2 || snake->direction == 4) snake->direction = dir;
+	}
+	else if(dir==2){      	//right
+		if(snake->direction == 1 || snake->direction == 3) snake->direction = dir;
+	}
+	else if(dir==3){      	//right
+		if(snake->direction == 2 || snake->direction == 4) snake->direction = dir;
+	}
+	else if(dir==4){      	//right
+		if(snake->direction == 1 || snake->direction == 3) snake->direction = dir;
+	}
+	dir_vector = 0;       	//initial the dir buffer
+}
+
+void Eatfood(struct SNAKE* snake, struct FOOD* food){
+	if(snake->x[0] == food->x && snake->y[0] == food->y){          //eat
+		snake->flag = 1;
+		food->flag = 1;
+    time_base = time_base+1;
+	}
+}
+
+static int Snakecrash(){
+  int i;
+	for(i=1; i<snake->length; i++){
+		if(snake->x[i]==snake->x[0] && snake->y[i]==snake->y[0]){
+			g_start=0;
+			return 1;
+		}
+	}
+	for(i=0; i < barrier->num; i++){
+		if(snake->x[0]==barrier->x[i] && snake->y[0] == barrier->y[i]){
+			g_start = 0;
+			return 1;
+		}
+	}
+	return 0;
+}
+  
+
+void GAME_Start(struct SNAKE* snake, struct FOOD* food, struct BARRIER* barrier){    //start
+	//snake is already a pointer
+	Snake_Init(snake);        			//initial snake
+	Food_Init(snake, food);          	//initial food
+	Barrier_Init(snake, food, barrier);
+
+	Snake_Draw(snake);
+	Food_Draw(food);
+	Barrier_Draw(barrier);
+
+	//draw the screen 
+	Game_Screen();
+	g_start = 1;
+  time_base = 10;
+	mod_timer(&Timer, jiffies + 1 * HZ);        //every 1S the snake move
+}
+
+void GAME_Handle(struct SNAKE* snake, struct FOOD* food, struct BARRIER* barrier){
+
+	//check direction
+	Snake_Chdir(snake, dir_vector);
+
+	//move snake
+	Snake_Move(snake);   
+	
+	//if Eat
+	Eatfood(snake, food);     //if eat the snake will be longer in the next loop
+	
+  //if conflict 
+  if(Snakecrash()){
+    mod_timer(&Timer, jiffies + msecs_to_jiffies(7000));    //
+    Credit_Process(snake);
+    Credit_Screen();
+  }
+ 
+	//next step
+  else if(!Snakecrash()){
+    //show on screen
+	  Snake_Draw(snake);
+	  Food_Draw(food);
+	  Barrier_Draw(barrier);
+	
+
+	    //draw the screen 
+     Game_Screen();
+     mod_timer(&Timer, jiffies + msecs_to_jiffies(10000/time_base));    //
+  }
+}
+
+void Game_Screen(){
+	int i=0;
+	//background
+	build_arrays();
+	sys_fillrect(info, Rblank);
+
+	//show on the screen
+	sys_fillrect(info, foodimage[i]);
+	for(i=0; i<barrier->num; i++){
+		sys_fillrect(info, barrierimage[i]);
+	}
+	for(i=0; i<snake->length; i++){
+		sys_fillrect(info, snakeimage[i]);
+	}
+}
+
+void Credit_Screen(){
+	int i=0;
+	//background
+	build_arrays();
+	sys_fillrect(info, Rblank);
+	//show credit on the screen
+	for(i=0; i<35; i++){
+		sys_fillrect(info, digitimage[i]);
+	}
+}
+
+
+static int screenev_connect(struct input_handler *handler, struct input_dev *dev, const struct input_device_id *id)
+{
+	struct input_handle *handle;
+	int error;
+
+	handle = kzalloc(sizeof(struct input_handle), GFP_KERNEL);
+	if (!handle)
+  		return -ENOMEM;
+
+	handle->dev = dev;
+	handle->handler = handler;
+	handle->name = "kbd";
+
+	error = input_register_handle(handle);
+	if (error)
+  		goto err_free_handle;
+
+	error = input_open_device(handle);
+	if (error)
+  		goto err_unregister_handle;
+
+	return 0;
+
+err_unregister_handle:
+	input_unregister_handle(handle);
+err_free_handle:
+	kfree(handle);
+	return error;
+}
+
+
+static void screenev_disconnect(struct input_handle *handle)
+{
+  	input_close_device(handle);
+	input_unregister_handle(handle);
+	kfree(handle);
+}
+
+MODULE_DEVICE_TABLE(input, screenev_ids);
+
+
+static struct input_device_id screenev_ids[2] = {
+	{ .driver_info = 1 },	// Matches all devices
+	{ },			// Terminating zero entry
+};
+
+static void screenev_event(struct input_handle *handle, unsigned int type, unsigned int code, int value)
+{
+	// Runs when an event occurs
+	input_flag = 0;
+	mod_timer(&Timer,  jiffies + 15 * HZ);
+}
+
+static struct input_handler screenev_handler = {
+	.event		= screenev_event,
+	.connect	= screenev_connect,
+	.disconnect	= screenev_disconnect,
+	.legacy_minors	= true,
+	.name		= "screenev",
+	.id_table	= screenev_ids,
+};
+
+
+/* Helper function borrowed from drivers/video/fbdev/core/fbmem.c */
+static struct fb_info *get_fb_info(unsigned int idx)
+{
+	struct fb_info *fb_info;
+
+	if (idx >= FB_MAX)
+        	return ERR_PTR(-ENODEV);
+
+	fb_info = registered_fb[idx];
+	if (fb_info)
+        	atomic_inc(&fb_info->count);
+
+	return fb_info;
+}
+
+
+static int __init myscreensaver_init(void)
+{
+	int result, ret;
+
+	printk(KERN_INFO "Hello framebuffer!\n");
+
+	// Register device
+	result = register_chrdev(myscreensaver_major, "myscreensaver", &myscreensaver_fops);
+	if (result < 0)
+	{
+        printk(KERN_ALERT "Cannot obtain major number");
+		return result;
+    	}
+
+
+	// Register input handler
+	ret = input_register_handler(&screenev_handler);
+	if (ret < 0)
+	{
+		printk(KERN_ALERT "Unable to register input handler");
+		return ret;
+	}
+
+
+	// Initialize all graphics arrays
+	//initial snake, food, barrier
+	snake = (struct SNAKE*)kmalloc(sizeof(struct SNAKE), GFP_KERNEL);
+	food =  (struct FOOD*)kmalloc(sizeof(struct FOOD), GFP_KERNEL);
+	barrier = (struct BARRIER*)kmalloc(sizeof(struct BARRIER), GFP_KERNEL);
+	barrier->num = 0;      //initial the barrier number
+	
+	//set the background black
+	blank = kmalloc(sizeof(struct fb_fillrect), GFP_KERNEL);
+	Start_Screen(blank);     //set start screen
+
+	//initiate button
+	ret = BTNs_Init(BTN_ZERO, BTN_ONE, BTN_TWO, BTN_THREE);
+	if (ret < 0)
+	{
+		printk(KERN_ALERT "Unable to register Button");
+		return ret;
+	}
+
+	// Start 15 second timer
+	timer_setup(&Timer, mytimer_callback, 0);
+    mod_timer(&Timer, jiffies + 15 * HZ);
+
+	printk(KERN_INFO "Module init complete\n");
+    	return 0;
+
+}
+
+static void __exit myscreensaver_exit(void) {
+	//will run when call rmmod myscreensaver
+	//may cause page domain fault or kernel oops if screensaver is currently drawing - needs to be off in order to not cause error and remove successfully
+	// Cleanup framebuffer graphics
+	int i;
+	kfree(blank);
+	kfree(Rblank);
+	kfree(snake);
+	kfree(food);
+	kfree(barrier);
+
+    for(i=0; i<9; i++)
+    {
+        kfree(bulogo[i]);
+    }
+	
+	//Freeing GPIO
+	free_irq(gpio_to_irq(BTN_ZERO), NULL);
+    gpio_free(BTN_ZERO);
+	free_irq(gpio_to_irq(BTN_ONE), NULL);
+    gpio_free(BTN_ONE);
+	free_irq(gpio_to_irq(BTN_TWO), NULL);
+    gpio_free(BTN_TWO);
+	free_irq(gpio_to_irq(BTN_THREE), NULL);
+    gpio_free(BTN_THREE);
+
+	// Unregister evdev handler
+	input_unregister_handler(&screenev_handler);
+
+	// Delete remaining timers
+	del_timer_sync(&Timer);
+	
+	// Freeing the major number
+        unregister_chrdev(myscreensaver_major, "myscreensaver");
+
+    	printk(KERN_INFO "Goodbye framebuffer!\n");
+    	printk(KERN_INFO "Module exiting\n");
+}
+
+module_init(myscreensaver_init);
+module_exit(myscreensaver_exit);
+
+
+static int myscreensaver_open(struct inode *inode, struct file *filp)
+{
+        /* Success */
+        return 0;
+}
+
+static int myscreensaver_release(struct inode *inode, struct file *filp)
+{
+        /* Success */
+        return 0;
+}
+
+void build_arrays()
+{
+    // Set up balck background
+    Rblank = kmalloc(sizeof(struct fb_fillrect), GFP_KERNEL);
+	Rblank->dx = 0;
+	Rblank->dy = 0;
+    Rblank->width = 480;
+    Rblank->height = 272;
+    Rblank->color = CYG_FB_DEFAULT_PALETTE_BLACK;
+    Rblank->rop = ROP_COPY;
+}
+
+void Start_Screen(struct fb_fillrect* blank){
+	blank->dx = 0;
+	blank->dy = 0;
+    blank->width = 480;
+    blank->height = 272;
+    blank->color = CYG_FB_DEFAULT_PALETTE_BLUE;
+    blank->rop = ROP_COPY;
+	info = get_fb_info(0);
+    lock_fb_info(info);
+	sys_fillrect(info, blank);
+	unlock_fb_info(info);
+}		
+
+int Button_Init(int btn){
+	int ret;
+	if (!gpio_is_valid(btn)) 
+	{
+        printk(KERN_INFO "Invalid GPIO pin %d\n", btn);
+        return -ENODEV;
+    	}
+    	ret = gpio_request(btn, "snake-BTN");
+    if (ret < 0) 
+	{
+        printk(KERN_INFO "Failed to request GPIO pin %d\n", btn);
+        return ret;
+    	}
+    	ret = gpio_direction_input(btn);
+    if (ret < 0) {
+        printk(KERN_INFO "Failed to set GPIO pin %d as input\n", btn);
+        gpio_free(btn);
+        return ret;
+    }
+	switch (btn){
+		case 26:
+			ret = request_irq(gpio_to_irq(btn), (irq_handler_t)btn0_handler, IRQF_TRIGGER_RISING, "snake_irq_zero", NULL);
+			break;
+		case 46:
+			ret = request_irq(gpio_to_irq(btn), (irq_handler_t)btn1_handler, IRQF_TRIGGER_RISING, "snake_irq_one", NULL);
+			break;
+		case 47:
+			ret = request_irq(gpio_to_irq(btn), (irq_handler_t)btn2_handler, IRQF_TRIGGER_RISING, "snake_irq_two", NULL);
+			break;
+		case 27:
+			ret = request_irq(gpio_to_irq(btn), (irq_handler_t)btn3_handler, IRQF_TRIGGER_RISING, "snake_irq_three", NULL);
+			break;
+		default:
+			break;
+	}
+    if (ret < 0) {
+        printk(KERN_INFO "Failed to request interrupt for GPIO pin %d\n", btn);
+        gpio_free(btn);
+        return ret;
+    }
+	return ret;
+}
+
+int BTNs_Init(int btn0, int btn1, int btn2, int btn3){
+	int ret;
+	ret = Button_Init(btn0);
+	if(ret<0) return ret;
+
+	ret = Button_Init(btn1);
+	if(ret<0) return ret;
+
+	ret = Button_Init(btn2);
+	if(ret<0) return ret;
+
+	ret = Button_Init(btn3);
+	if(ret<0) return ret;
+
+	return ret;
+}
+
+static irqreturn_t btn0_handler(int irq, void *dev_id){
+	dir_vector = 1;    //up
+	return IRQ_HANDLED;
+}
+static irqreturn_t btn1_handler(int irq, void *dev_id){
+	dir_vector = 2;    //right
+	return IRQ_HANDLED;
+}
+static irqreturn_t btn2_handler(int irq, void *dev_id){
+	dir_vector = 3;    //down
+	return IRQ_HANDLED;
+}
+static irqreturn_t btn3_handler(int irq, void *dev_id){
+	dir_vector = 4;    //left
+	return IRQ_HANDLED;
+}
+
+
+void screensaver_handler(void)
+{
+    int i;
+    int xpos = 0; // starting position of the logo
+    int xdir = 1; // direction of movement (1 = right, -1 = left)
+    int speed = 10; // number of pixels to move per iteration
+    int screen_width = 480;
+
+    info = get_fb_info(0);
+    lock_fb_info(info);
+
+    // Initial Setup
+    while (input_flag == 1)
+    {
+        sys_fillrect(info, Rblank);
+
+        // Move logo horizontally
+        xpos += speed * xdir;
+        for (i = 0; i < 9; i++)
+        {
+            bulogo[i]->dx = xpos + bulogo[i]->dx - 120;
+            sys_fillrect(info, bulogo[i]);
+        }
+
+        // Check if logo reaches edge of screen
+        if (xpos <= 0 || xpos + 220 >= screen_width)
+        {
+            xdir *= -1; // change direction
+            xpos += speed * xdir; // move back in opposite direction
+        }
+
+        if (input_flag == 0)
+            break;
+
+        msleep(100);
+    }
+
+    blank->color = CYG_FB_DEFAULT_PALETTE_BLACK;
+    sys_fillrect(info, blank);
+    unlock_fb_info(info);
+}
+
+
+//process the credit
+void Credit_Process(struct SNAKE* snake){
+	int credit;
+	int digitnum;
+	int i;
+	int a[5];
+	credit = (snake->length*snake->length-4)*10000/9996;
+	
+	a[4] = credit/10000;
+	a[3] = (credit/1000)%10;
+	a[2] = (credit/100)%10;
+	a[1] = (credit/10)%10;
+	a[0] = credit%10;
+
+	//avoid light high 0
+	for(i=4; i>=0; i--){
+		if(a[i] != 0) break; 
+	}
+	digitnum = i;
+	
+	Digits_Draw(digitnum, 4, a[4]);        //
+	Digits_Draw(digitnum, 3, a[3]);        //
+	Digits_Draw(digitnum, 2, a[2]);
+	Digits_Draw(digitnum, 1, a[1]);
+	Digits_Draw(digitnum, 0, a[0]);
+
+}
+
+
+void Digits_Draw(int digitnum, int digit, int num){
+	int i=0;
+	//kmalloc
+	for(i=0; i<7; i++){
+		digitimage[digit+i*5] = kmalloc(sizeof(struct fb_fillrect), GFP_KERNEL);
+	}
+
+	//color
+	if(digit > digitnum){         //the high digit is 0, do not show
+		for(i=0; i<7; i++){
+			digitimage[digit+i*5]->color = CYG_FB_DEFAULT_PALETTE_BLACK;
+		}
+
+	}	
+	else if(digit <= digitnum){     //the low digit should show
+		//collor
+		if(num==0 || num==1 || num==3 || num==4 || num==7 || num==8 || num==9){
+			digitimage[15+digit]->color = CYG_FB_DEFAULT_PALETTE_RED;
+			digitimage[20+digit]->color = CYG_FB_DEFAULT_PALETTE_RED;
+		}
+
+		if(num==2 || num==3 || num==5 || num==6 || num == 8 || num==9){
+			digitimage[0+digit]->color = CYG_FB_DEFAULT_PALETTE_RED;
+			digitimage[5+digit]->color = CYG_FB_DEFAULT_PALETTE_RED;
+			digitimage[10+digit]->color = CYG_FB_DEFAULT_PALETTE_RED;	
+
+		}
+		switch (num)
+		{
+			case 1:
+				digitimage[0+digit]->color = CYG_FB_DEFAULT_PALETTE_BLACK;
+				digitimage[5+digit]->color = CYG_FB_DEFAULT_PALETTE_BLACK;
+				digitimage[10+digit]->color = CYG_FB_DEFAULT_PALETTE_BLACK;
+				digitimage[30+digit]->color = CYG_FB_DEFAULT_PALETTE_BLACK;
+				digitimage[25+digit]->color = CYG_FB_DEFAULT_PALETTE_BLACK;
+				break;
+			case 2:
+				digitimage[20+digit]->color = CYG_FB_DEFAULT_PALETTE_RED;
+				digitimage[25+digit]->color = CYG_FB_DEFAULT_PALETTE_RED;
+				digitimage[30+digit]->color = CYG_FB_DEFAULT_PALETTE_BLACK;
+				digitimage[15+digit]->color = CYG_FB_DEFAULT_PALETTE_BLACK;
+				break;
+			case 3:
+				digitimage[30+digit]->color = CYG_FB_DEFAULT_PALETTE_BLACK;
+				digitimage[25+digit]->color = CYG_FB_DEFAULT_PALETTE_BLACK;
+				break;
+			case 4:
+				digitimage[5+digit]->color = CYG_FB_DEFAULT_PALETTE_RED;
+				digitimage[30+digit]->color = CYG_FB_DEFAULT_PALETTE_RED;
+
+				digitimage[25+digit]->color = CYG_FB_DEFAULT_PALETTE_BLACK;
+				digitimage[10+digit]->color = CYG_FB_DEFAULT_PALETTE_BLACK;
+				digitimage[0+digit]->color = CYG_FB_DEFAULT_PALETTE_BLACK;
+				break;
+			case 5:
+				digitimage[30+digit]->color = CYG_FB_DEFAULT_PALETTE_RED;
+				digitimage[15+digit]->color = CYG_FB_DEFAULT_PALETTE_RED;
+				digitimage[20+digit]->color = CYG_FB_DEFAULT_PALETTE_BLACK;
+				digitimage[25+digit]->color = CYG_FB_DEFAULT_PALETTE_BLACK;
+				break;
+			case 6:
+				digitimage[30+digit]->color = CYG_FB_DEFAULT_PALETTE_RED;	
+				digitimage[25+digit]->color = CYG_FB_DEFAULT_PALETTE_RED;	
+				digitimage[15+digit]->color = CYG_FB_DEFAULT_PALETTE_RED;
+				digitimage[20+digit]->color = CYG_FB_DEFAULT_PALETTE_BLACK;
+				break;
+			case 7:
+				digitimage[10+digit]->color = CYG_FB_DEFAULT_PALETTE_RED;
+				digitimage[0+digit]->color = CYG_FB_DEFAULT_PALETTE_BLACK;
+				digitimage[5+digit]->color = CYG_FB_DEFAULT_PALETTE_BLACK;
+				digitimage[30+digit]->color = CYG_FB_DEFAULT_PALETTE_BLACK;
+				digitimage[25+digit]->color = CYG_FB_DEFAULT_PALETTE_BLACK;
+				break;
+			case 8:
+				digitimage[30+digit]->color = CYG_FB_DEFAULT_PALETTE_RED;	
+				digitimage[25+digit]->color = CYG_FB_DEFAULT_PALETTE_RED;	
+				break;
+			case 9:
+				digitimage[30+digit]->color = CYG_FB_DEFAULT_PALETTE_RED;	
+				digitimage[25+digit]->color = CYG_FB_DEFAULT_PALETTE_BLACK;	
+				break;
+			case 0:
+				digitimage[10+digit]->color = CYG_FB_DEFAULT_PALETTE_RED;	
+				digitimage[0+digit]->color = CYG_FB_DEFAULT_PALETTE_RED;	
+				digitimage[30+digit]->color = CYG_FB_DEFAULT_PALETTE_RED;	
+				digitimage[25+digit]->color = CYG_FB_DEFAULT_PALETTE_RED;	
+				digitimage[5+digit]->color = CYG_FB_DEFAULT_PALETTE_RED;	
+				break;
+			default:
+				break;
+		}
+	}
+
+	//rop
+	for(i=0; i<7; i++){
+		digitimage[digit+i*5]->rop = ROP_COPY;
+	}
+
+	//paralize
+	for(i=0; i<3; i++){            //0,5,10
+		digitimage[digit+ 5*i]->dx = 400-(digit%5)*55;       //related with digit
+		digitimage[digit+ 5*i]->dy = 30 + i*35;      		//related with i
+		digitimage[digit+ 5*i]->width = 30;
+		digitimage[digit+ 5*i]->height = 5;
+	}
+	//vertical right
+	for(i=3; i<5; i++){
+		digitimage[digit+ 5*i]->dx = 430-(digit%5)*55;
+		digitimage[digit+ 5*i]->dy = 35 + (i-3)*35;
+		digitimage[digit+ 5*i]->width = 5;
+		digitimage[digit+ 5*i]->height = 30;
+	}
+	//vertical left
+	for(i=5; i<7; i++){
+		digitimage[digit+ 5*i]->dx = 395-(digit%5)*55;
+		digitimage[digit+ 5*i]->dy = 35 + (i-5)*35;
+		digitimage[digit+ 5*i]->width = 5;
+		digitimage[digit+ 5*i]->height = 30;
+	}
+}
+
+
+
+
+
 
